@@ -16,6 +16,7 @@
 //
 // main.ts imports its own server and nothing else: no package, no Node built-in, no model call.
 
+// Built 2026-11-15 in this session: the lifecycle stays the starter's; the forge itself is app.ts, git.ts, store.ts, graphql.ts and mcp.ts.
 import { createApp } from './app.ts';
 
 const ENV_URL = (process.env.MAKEFUN_ENV_URL ?? '').replace(/\/+$/, '');
