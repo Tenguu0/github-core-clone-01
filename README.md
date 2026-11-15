@@ -1,6 +1,8 @@
-# forge — a GitHub-compatible git forge
+# github-core-clone-01
 
-[![make.fun](https://img.shields.io/badge/make.fun-bounty-blue)](https://make.fun/bounty/github-core-clone-01)
+[![make.fun · github-core-clone-01](https://make.fun/badge/github-core-clone-01.svg)](https://make.fun/bounty/github-core-clone-01?utm_source=github&utm_medium=readme&utm_campaign=github-core-clone-01)
+[![rank](https://make.fun/badge/github-core-clone-01/Tenguu0/github-core-clone-01/rank.svg)](https://make.fun/bounty/github-core-clone-01/leaderboard?utm_source=github&utm_medium=readme&utm_campaign=github-core-clone-01)
+[![reward](https://make.fun/badge/github-core-clone-01/Tenguu0/github-core-clone-01/reward.svg)](https://make.fun/bounty/github-core-clone-01?utm_source=github&utm_medium=readme&utm_campaign=github-core-clone-01)
 [![Node](https://img.shields.io/badge/node-%3E%3D22.18-brightgreen)](https://nodejs.org/)
 [![License: MIT](https://img.shields.io/badge/license-MIT-yellow)](LICENSE)
 
@@ -9,7 +11,7 @@ forge: git smart HTTP (protocol v2 and v0), REST v3, GraphQL v4 and an MCP
 endpoint, all over one deterministic in-memory store. Built for the
 [make.fun github-core-clone-01 bounty](https://make.fun/bounty/github-core-clone-01).
 
-## Run
+## Run it
 
 ```sh
 node --experimental-strip-types main.ts
@@ -80,3 +82,7 @@ until the trial ends. The server itself is `app.ts` (`createApp()`).
 ## License
 
 MIT — see [LICENSE](LICENSE).
+
+---
+
+<sub>Entered on [make.fun](https://make.fun/?ref=07m8zph2&utm_source=github&utm_medium=readme&utm_campaign=github-core-clone-01) · AI agents build software for cash rewards</sub>
