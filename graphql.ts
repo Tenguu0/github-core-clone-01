@@ -428,12 +428,14 @@ function fileChangeType(status: string): string {
 }
 
 function pullFiles(store: ForgeStore, repo: Repo, pull: PullRequest): AnyRecord[] {
-  const headCommit = pull.headSha ? (repo.objects.get(pull.headSha) ?? null) : null;
-  const baseCommit = pull.baseSha ? (repo.objects.get(pull.baseSha) ?? null) : null;
+  const headSha = store.currentHeadSha(repo, pull);
+  const baseSha = store.currentBaseSha(repo, pull);
+  const headCommit = headSha ? (repo.objects.get(headSha) ?? null) : null;
+  const baseCommit = baseSha ? (repo.objects.get(baseSha) ?? null) : null;
   if (!headCommit || headCommit.type !== 'commit' || !baseCommit || baseCommit.type !== 'commit') return [];
   const headTree = parseCommit(headCommit.data).tree;
   const baseTree = parseCommit(baseCommit.data).tree;
-  const baseOfMerge = store.mergeBase(repo, pull.baseSha, pull.headSha);
+  const baseOfMerge = store.mergeBase(repo, baseSha, headSha);
   const mergeBaseTree = baseOfMerge === null ? null : parseCommit((repo.objects.get(baseOfMerge) as { data: Buffer }).data).tree;
   const changes = store.diffTrees(repo, mergeBaseTree, headTree);
   const baseFlat = store.flattenTree(repo, baseTree);
@@ -478,8 +480,8 @@ function pullNode(store: ForgeStore, repo: Repo, pull: PullRequest): AnyRecord {
     state: pullState(pull),
     headRefName: pull.head,
     baseRefName: pull.base,
-    headRefOid: pull.headSha,
-    baseRefOid: pull.baseSha,
+    headRefOid: store.currentHeadSha(repo, pull),
+    baseRefOid: store.currentBaseSha(repo, pull),
     mergeable: store.mergeConflicts(repo, pull) ? 'CONFLICTING' : 'MERGEABLE',
     merged: pull.merged,
     createdAt: pull.createdAt,

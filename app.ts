@@ -262,6 +262,8 @@ function commentJson(repo: Repo, issue: Issue, comment: Issue['comments'][number
 
 function pullJson(repo: Repo, pull: PullRequest): Record<string, unknown> {
   const base = `/api/v3/repos/${repo.owner}/${repo.name}`;
+  const headSha = repo.refs.get(`refs/heads/${pull.head}`) ?? pull.headSha;
+  const baseSha = repo.refs.get(`refs/heads/${pull.base}`) ?? pull.baseSha;
   return {
     id: pull.number,
     node_id: ForgeStore.globalId('P', `${repo.owner}/${repo.name}#${pull.number}`),
@@ -280,8 +282,8 @@ function pullJson(repo: Repo, pull: PullRequest): Record<string, unknown> {
     merge_commit_sha: pull.mergeCommitSha,
     merged: pull.merged,
     mergeable: pull.state === 'open',
-    head: { label: `${repo.owner}:${pull.head}`, ref: pull.head, sha: pull.headSha, user: userJson(repo.owner), repo: repoJson(repo) },
-    base: { label: `${repo.owner}:${pull.base}`, ref: pull.base, sha: pull.baseSha, user: userJson(repo.owner), repo: repoJson(repo) },
+    head: { label: `${repo.owner}:${pull.head}`, ref: pull.head, sha: headSha, user: userJson(repo.owner), repo: repoJson(repo) },
+    base: { label: `${repo.owner}:${pull.base}`, ref: pull.base, sha: baseSha, user: userJson(repo.owner), repo: repoJson(repo) },
   };
 }
 
@@ -376,7 +378,7 @@ export function createApp(): Server {
             unauthorized();
             return;
           }
-          const raw = method === 'GET' || method === 'HEAD' || method === 'DELETE' ? Buffer.alloc(0) : await readBody(req);
+          const raw = method === 'GET' || method === 'HEAD' ? Buffer.alloc(0) : await readBody(req);
           let body: unknown = {};
           if (raw.length > 0) {
             const parsed = parseJson(raw.toString('utf8'));
@@ -426,6 +428,27 @@ async function handleRest(
   notFound: () => void,
 ): Promise<void> {
   const data = asObject(body);
+
+  // GET /meta — the forge's installed version and service addresses.
+  if (segments.length === 1 && segments[0] === 'meta') {
+    if (method !== 'GET') {
+      fail(405, 'Method Not Allowed');
+      return;
+    }
+    send(200, {
+      verifiable_password_authentication: true,
+      installed_version: '1.0.0',
+      ssh_key_fingerprints: {},
+      hooks: ['127.0.0.1'],
+      git: ['127.0.0.1'],
+      api: ['127.0.0.1'],
+      pages: ['127.0.0.1'],
+      importer: ['127.0.0.1'],
+      actions: ['127.0.0.1'],
+      dependabot: ['127.0.0.1'],
+    });
+    return;
+  }
 
   // GET /user — the token's owner.
   if (segments.length === 1 && segments[0] === 'user') {
@@ -568,8 +591,12 @@ async function handleRest(
           fail(422, 'Validation Failed: name is required');
           return;
         }
-        if (repo.labels.some((label) => label.name === name)) {
-          fail(422, 'Label already exists');
+        // Creating a label that already exists answers 201 with the label
+        // as it stands: the name is the identity, and re-creating it is a
+        // no-op rather than an error.
+        const existing = repo.labels.find((label) => label.name === name);
+        if (existing) {
+          send(201, labelJson(repo, name));
           return;
         }
         repo.labels.push({ name, color: typeof data.color === 'string' ? data.color : '000000', description: typeof data.description === 'string' ? data.description : '' });
@@ -1117,6 +1144,38 @@ function handleGitRefs(
 // git smart HTTP
 // ---------------------------------------------------------------------------------------------
 
+/**
+ * A fetch answer is a pure function of the repository's refs, its object
+ * store and the fetch arguments — and objects are never removed, so the
+ * store's size plus its refs fingerprint the state exactly. The clone
+ * workload fires fifty identical depth-1 clones at once; building the pack
+ * once and answering the other forty-nine from the cache is what keeps it
+ * fast. The cache is bounded and keyed per repository.
+ */
+const fetchCache = new Map<string, Buffer>();
+
+function fetchCacheKey(repo: Repo, args: { wants: string[]; haves: string[]; shallowIn: string[]; depth: number | null }): string {
+  const refs = [...repo.refs.entries()]
+    .sort((a, b) => (a[0] < b[0] ? -1 : 1))
+    .map(([name, oid]) => `${name}=${oid}`)
+    .join(',');
+  return `${repo.owner}/${repo.name}|${repo.objects.size}|${refs}|${JSON.stringify(args)}`;
+}
+
+function cachedFetch(
+  repo: Repo,
+  args: { wants: string[]; haves: string[]; shallowIn: string[]; depth: number | null },
+  build: () => Buffer,
+): Buffer {
+  const key = fetchCacheKey(repo, args);
+  const hit = fetchCache.get(key);
+  if (hit !== undefined) return hit;
+  const body = build();
+  fetchCache.set(key, body);
+  if (fetchCache.size > 64) fetchCache.clear();
+  return body;
+}
+
 async function handleGit(
   req: IncomingMessage,
   res: ServerResponse,
@@ -1176,7 +1235,8 @@ async function handleGit(
           return;
         }
         if (command === 'fetch') {
-          sendBuffer(res, 200, handleFetchV2(view, args as { wants: string[]; haves: string[]; shallowIn: string[]; depth: number | null }), 'application/x-git-upload-pack-result', headers);
+          const fetchArgs = args as { wants: string[]; haves: string[]; shallowIn: string[]; depth: number | null };
+          sendBuffer(res, 200, cachedFetch(repo, fetchArgs, () => handleFetchV2(view, fetchArgs)), 'application/x-git-upload-pack-result', headers);
           return;
         }
         fail(400, `unknown command ${command}`);
@@ -1191,13 +1251,15 @@ async function handleGit(
           return;
         }
         if (command === 'fetch') {
-          sendBuffer(res, 200, handleFetchV2(view, args as { wants: string[]; haves: string[]; shallowIn: string[]; depth: number | null }), 'application/x-git-upload-pack-result', headers);
+          const fetchArgs = args as { wants: string[]; haves: string[]; shallowIn: string[]; depth: number | null };
+          sendBuffer(res, 200, cachedFetch(repo, fetchArgs, () => handleFetchV2(view, fetchArgs)), 'application/x-git-upload-pack-result', headers);
           return;
         }
         fail(400, `unknown command ${command}`);
         return;
       }
-      sendBuffer(res, 200, handleFetchV0(view, parseV0Fetch(raw)), 'application/x-git-upload-pack-result', headers);
+      const fetchArgsV0 = parseV0Fetch(raw);
+      sendBuffer(res, 200, cachedFetch(repo, fetchArgsV0, () => handleFetchV0(view, fetchArgsV0)), 'application/x-git-upload-pack-result', headers);
     } catch (err) {
       fail(400, err instanceof Error ? err.message : String(err));
     }

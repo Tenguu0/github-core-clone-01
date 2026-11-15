@@ -351,13 +351,23 @@ export class ForgeStore {
     return changes;
   }
 
+  /** The base branch's current tip: a merge always runs against the base as it stands now, not as it stood when the pull request was opened. */
+  currentBaseSha(repo: Repo, pull: PullRequest): string {
+    return repo.refs.get(`refs/heads/${pull.base}`) ?? pull.baseSha;
+  }
+
+  /** The head branch's current tip, for the same reason. */
+  currentHeadSha(repo: Repo, pull: PullRequest): string {
+    return repo.refs.get(`refs/heads/${pull.head}`) ?? pull.headSha;
+  }
+
   /**
    * Whether a squash merge of `pull` would conflict: a path changed on both
    * sides of the merge-base with different results. Pure: creates nothing.
    */
   mergeConflicts(repo: Repo, pull: PullRequest): boolean {
-    const headCommit = peelToCommit(pull.headSha, (oid) => repo.objects.get(oid));
-    const baseCommit = peelToCommit(pull.baseSha, (oid) => repo.objects.get(oid));
+    const headCommit = peelToCommit(this.currentHeadSha(repo, pull), (oid) => repo.objects.get(oid));
+    const baseCommit = peelToCommit(this.currentBaseSha(repo, pull), (oid) => repo.objects.get(oid));
     if (headCommit === null || baseCommit === null) return true;
     const baseObject = repo.objects.get(baseCommit);
     const headObject = repo.objects.get(headCommit);
@@ -382,8 +392,8 @@ export class ForgeStore {
    */
   squashMerge(repo: Repo, pull: PullRequest): string | null {
     if (this.mergeConflicts(repo, pull)) return null;
-    const headCommit = peelToCommit(pull.headSha, (oid) => repo.objects.get(oid)) as string;
-    const baseCommit = peelToCommit(pull.baseSha, (oid) => repo.objects.get(oid)) as string;
+    const headCommit = peelToCommit(this.currentHeadSha(repo, pull), (oid) => repo.objects.get(oid)) as string;
+    const baseCommit = peelToCommit(this.currentBaseSha(repo, pull), (oid) => repo.objects.get(oid)) as string;
     const baseObject = repo.objects.get(baseCommit) as GitObject;
     const headObject = repo.objects.get(headCommit) as GitObject;
     const baseTree = parseCommit(baseObject.data).tree;
@@ -404,11 +414,13 @@ export class ForgeStore {
 
   /** The file changes of a pull request, head vs its merge-base. */
   pullFileList(repo: Repo, pull: PullRequest): PullFileChange[] {
-    const headObject = pull.headSha ? repo.objects.get(pull.headSha) : undefined;
-    const baseObject = pull.baseSha ? repo.objects.get(pull.baseSha) : undefined;
+    const headSha = this.currentHeadSha(repo, pull);
+    const baseSha = this.currentBaseSha(repo, pull);
+    const headObject = headSha ? repo.objects.get(headSha) : undefined;
+    const baseObject = baseSha ? repo.objects.get(baseSha) : undefined;
     if (!headObject || headObject.type !== 'commit' || !baseObject || baseObject.type !== 'commit') return [];
     const headTree = parseCommit(headObject.data).tree;
-    const mergeBase = this.mergeBase(repo, pull.baseSha, pull.headSha);
+    const mergeBase = this.mergeBase(repo, baseSha, headSha);
     const mergeBaseTree = mergeBase === null ? null : parseCommit((repo.objects.get(mergeBase) as GitObject).data).tree;
     const changes = this.diffTrees(repo, mergeBaseTree, headTree);
     const baseFlat = this.flattenTree(repo, parseCommit(baseObject.data).tree);

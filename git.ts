@@ -457,7 +457,10 @@ export function handleLsRefs(repo: GitRepoView, args: LsRefsArgs): Buffer {
   const refs = repo.listRefs();
   const keep = (name: string): boolean => args.prefixes.length === 0 || args.prefixes.some((prefix) => name.startsWith(prefix));
   const headTip = repo.getRef(`refs/heads/${repo.defaultBranch}`);
-  if (args.symrefs) {
+  // HEAD is a symref, not a ref under any prefix: it answers only when no
+  // prefix filter is in force, or a prefix filter would otherwise return
+  // nothing but the symref itself.
+  if (args.symrefs && args.prefixes.length === 0) {
     if (headTip !== undefined) {
       parts.push(pktLine(`${headTip} HEAD symref-target:refs/heads/${repo.defaultBranch}\n`));
     } else if (args.unborn) {
@@ -496,12 +499,33 @@ export interface FetchSelection {
 
 export function selectFetch(repo: GitRepoView, args: FetchArgs): FetchSelection {
   const lookup = (oid: string): GitObject | undefined => repo.getObject(oid);
+  // The objects the client already holds: the closure of its haves, stopping
+  // at its shallow boundaries — a shallow commit's tree is held, its parents
+  // are not. A plain closure would claim the client holds the very history a
+  // deepen fetch is asking for, and the parent would never be delivered.
+  const shallowHeld = new Set(args.shallowIn);
   const haveClosure = new Set<string>();
-  for (const have of args.haves) {
-    try {
-      for (const oid of collectReachable([have], lookup)) haveClosure.add(oid);
-    } catch {
-      // A have the server does not hold is simply not held: ignore it.
+  {
+    const queue: string[] = [...args.haves];
+    while (queue.length) {
+      const oid = queue.pop() as string;
+      if (haveClosure.has(oid)) continue;
+      const object = lookup(oid);
+      if (!object) continue;
+      haveClosure.add(oid);
+      if (object.type === 'commit') {
+        const commit = parseCommit(object.data);
+        queue.push(commit.tree);
+        if (!shallowHeld.has(oid)) {
+          for (const parent of commit.parents) queue.push(parent);
+        }
+      } else if (object.type === 'tag') {
+        queue.push(parseTag(object.data).object);
+      } else if (object.type === 'tree') {
+        for (const entry of parseTree(object.data)) {
+          if (entry.mode !== '160000') queue.push(entry.oid);
+        }
+      }
     }
   }
   // BFS over commits from the wants, tracking the shortest distance from any want.
@@ -565,10 +589,13 @@ export function selectFetch(repo: GitRepoView, args: FetchArgs): FetchSelection 
       }
     }
   }
-  // Unshallow: a previous boundary now included with every parent included or held.
+  // Unshallow: a previous boundary whose every parent is now included or
+  // held. The boundary commit itself need not be in the pack — in a deepen
+  // it is already held, and it is the delivery of its parent that unshallows
+  // it — but it must be held or included for the claim to mean anything.
   const unshallow: string[] = [];
   for (const oid of args.shallowIn) {
-    if (!included.has(oid)) continue;
+    if (!included.has(oid) && !haveClosure.has(oid)) continue;
     const object = lookup(oid);
     if (!object || object.type !== 'commit') continue;
     let allHeld = true;
@@ -580,30 +607,62 @@ export function selectFetch(repo: GitRepoView, args: FetchArgs): FetchSelection 
     }
     if (allHeld) unshallow.push(oid);
   }
-  // The object set: included commits' closures, plus wanted tags/objects, minus held objects.
-  const wanted = new Set<string>(included);
-  for (const oid of extraObjects.keys()) wanted.add(oid);
-  const reachable = new Set<string>();
-  for (const oid of wanted) {
-    try {
-      for (const next of collectReachable([oid], lookup)) reachable.add(next);
-    } catch {
-      // Unreachable through a missing object: skip what cannot be reached.
+  // The object set: the tree closures of the included commits, plus the
+  // wanted tags/objects — never the parents of an included commit. A parent
+  // is only an object here when it is itself included (or held, and then it
+  // is excluded below); following parents would hand a shallow fetch the
+  // history it asked not to receive.
+  const objectIds = new Set<string>();
+  const addTreeClosure = (treeOid: string): void => {
+    const stack: string[] = [treeOid];
+    while (stack.length) {
+      const oid = stack.pop() as string;
+      if (objectIds.has(oid)) continue;
+      const object = lookup(oid);
+      if (!object) continue;
+      objectIds.add(oid);
+      if (object.type === 'tree') {
+        for (const entry of parseTree(object.data)) {
+          if (entry.mode !== '160000') stack.push(entry.oid);
+        }
+      }
+    }
+  };
+  for (const oid of included) {
+    const object = lookup(oid);
+    if (!object || object.type !== 'commit') continue;
+    objectIds.add(oid);
+    addTreeClosure(parseCommit(object.data).tree);
+  }
+  for (const [oid, object] of extraObjects) {
+    objectIds.add(oid);
+    if (object.type === 'tag') {
+      const target = parseTag(object.data).object;
+      const targetObject = lookup(target);
+      if (!targetObject) continue;
+      if (targetObject.type === 'commit') {
+        if (!objectIds.has(target)) {
+          objectIds.add(target);
+          addTreeClosure(parseCommit(targetObject.data).tree);
+        }
+      } else if (targetObject.type === 'tree') {
+        addTreeClosure(target);
+      } else {
+        objectIds.add(target);
+      }
     }
   }
   const objects: GitObject[] = [];
-  for (const oid of reachable) {
+  for (const oid of objectIds) {
     if (haveClosure.has(oid)) continue;
     const object = lookup(oid);
     if (object) objects.push(object);
   }
-  // Deterministic order: sort by oid.
-  objects.sort((a, b) => {
-    const left = hashObject(a.type, a.data);
-    const right = hashObject(b.type, b.data);
-    return left < right ? -1 : left > right ? 1 : 0;
-  });
-  return { objects, shallow: shallow.sort(), unshallow: unshallow.sort() };
+  // Deterministic order: sort by oid, with each oid computed once (the
+  // comparator used to re-hash every object on every comparison).
+  const withOid = objects.map((object) => ({ oid: hashObject(object.type, object.data), object }));
+  withOid.sort((a, b) => (a.oid < b.oid ? -1 : a.oid > b.oid ? 1 : 0));
+  return { objects: withOid.map((entry) => entry.object), shallow: shallow.sort(), unshallow: unshallow.sort() };
 }
 
 /** Split pack bytes into sideband band-1 pkt-lines (<= 65516 payload bytes each). */
